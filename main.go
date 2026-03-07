@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -70,7 +71,7 @@ func main() {
 		}
 
 		// forging the response & forwarding it
-		response := FinalIteration(check(requestedDomain), requestedDomain, &dnsHeader, data[12:pointer+17])
+		response := FinalIteration(check(requestedDomain), requestedDomain, &dnsHeader, data[12:pointer+17], data)
 		listener.WriteToUDP(response, clientAddr)
 	}
 }
@@ -91,7 +92,7 @@ func extractDnsData(data []byte) (string, int) {
 	return domain[:len(domain)-1], pointer
 }
 func isBlocklisted() func(string) bool {
-	
+
 	blockList := make(map[string]bool)
 	f, err := os.Open("blocklist.txt")
 	if err != nil {
@@ -114,7 +115,7 @@ func isBlocklisted() func(string) bool {
 	}
 }
 
-func FinalIteration(result bool, domain string, header *DNSHeader, data []byte) []byte {
+func FinalIteration(result bool, domain string, header *DNSHeader, data []byte, originalRequest []byte) []byte {
 	var networkNum uint32
 	var nxDomain bool
 	header.Flags = 33152
@@ -123,7 +124,7 @@ func FinalIteration(result bool, domain string, header *DNSHeader, data []byte) 
 
 	// if domain is not in blocklist
 	if !result {
-		addrs, err := net.LookupHost(domain)
+		addr, err := ResolveDomain(domain, originalRequest)
 
 		// if domain doesnt exist (NXDOMAIN)
 		if err != nil {
@@ -131,8 +132,9 @@ func FinalIteration(result bool, domain string, header *DNSHeader, data []byte) 
 			header.Flags = 33155
 			nxDomain = true
 		} else {
-			networkNum = binary.BigEndian.Uint32(net.ParseIP(addrs[0]).To4())
+			networkNum = binary.BigEndian.Uint32(net.ParseIP(addr).To4())
 		}
+
 	}
 
 	response := make([]byte, 12)
@@ -153,4 +155,38 @@ func FinalIteration(result bool, domain string, header *DNSHeader, data []byte) 
 	}
 
 	return response
+}
+
+func ResolveDomain(domain string, data []byte) (string, error) {
+	conn, err := net.Dial("udp", "8.8.8.8:53")
+	if err != nil {
+		return "", errors.New("err: Unable to reach endpoint")
+	}
+	defer conn.Close()
+	conn.Write(data)
+		
+	rawBytes := make([]byte, 512)
+	_, err = conn.Read(rawBytes)
+	if err != nil {
+		return "0.0.0.0", errors.New("err: Unable to read bytes from UDP stream")
+	}
+
+	// validating if the domain exists or not
+	rcode := rawBytes[3] & 0x0F
+	if rcode == 3 {
+		return "", errors.New("NXDOMAIN")
+	}
+
+	// finding answer portion
+	pointer := 12
+	for {
+		if !(rawBytes[pointer] == 0) {
+			pointer++
+		} else {
+			break
+		}
+	}
+	ipString := net.IP(rawBytes[pointer+17 : pointer+21]).String()
+
+	return ipString, nil
 }
