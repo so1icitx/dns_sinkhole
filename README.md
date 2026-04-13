@@ -1,55 +1,67 @@
+<div align="center">
+<h1>dns_sinkhole</h1>
 
+A DNS resolver and sinkhole written in Go, without any DNS libraries. Parses
+UDP packets manually, validates domains, and either forwards to upstream or
+returns `0.0.0.0` for blocked domains.
 
-#  DNS-Sinkhole
+[![Go Report Card](https://goreportcard.com/badge/github.com/so1icitx/dns_sinkhole)](https://goreportcard.com/report/github.com/so1icitx/dns_sinkhole)
+[![License](https://img.shields.io/github/license/so1icitx/dns_sinkhole)](LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/so1icitx/dns_sinkhole)](go.mod)
 
-A lightweight, educational DNS resolver and "sinkhole" written in Go. This project explores the mechanics of the DNS protocol by manually parsing UDP packets, validating domain names, and forging responses.
+</div>
 
-> **Note:** This is an educational project designed for learning Go's `net` and `encoding/binary` packages. It is not intended for production security environments, it's a deep dive into the "magic" behind DNS.
+## How it works
 
-##  What’s under the hood?
+Queries arrive as raw UDP packets on port `5353`. The question section is
+parsed manually from the byte stream ,  no DNS library touches the data. The
+domain is validated with a compiled regex, then checked against a blocklist
+loaded from `blocklist.txt` at startup.
 
-This program doesn't use high-level DNS libraries. Instead, it interacts directly with the byte stream to understand how the internet's "phonebook" actually works.
+**Blocked domains** get a synthesized A record pointing to `0.0.0.0`.
 
-### Key Features
+**Legitimate domains** are forwarded as-is to `8.8.8.8`. The upstream
+response is parsed, the IP extracted, and a new answer record is assembled
+by hand and sent back to the client.
 
-* **Manual Packet Parsing:** Uses `binary.BigEndian` to decode and encode DNS headers and response structures directly from byte slices.
-* **Domain Sinkholing:** Implements a closure-based blocklist checker that uses a `map[string]bool` for $O(1)$ lookups.
-* **UDP Socket Handling:** Manually binds to a UDP port and manages the request/response lifecycle using `net.ListenUDP`.
-* **Upstream Forwarding:** Forwards legitimate requests to Google's Public DNS (`8.8.8.8`) and relays the results back to the client.
-* **Binary Forging:** Manually assembles DNS response packets, including setting flags for authoritative responses and handling `NXDOMAIN` errors.
+**Non-existent domains** return NXDOMAIN ,  flags `0x8183`, answer count `0`.
 
-##  How it works
+DNS headers and response records are encoded and decoded directly with
+`encoding/binary`. The response packet is built field by field into a byte
+slice with no intermediate representation.
 
-1. **Listen:** The server sits on port `5353` waiting for UDP packets.
-2. **Extract:** It strips the DNS header and parses the "Question" section to find the requested domain.
-3. **Validate:** It uses a pre-compiled regex to ensure the domain isn't malicious/bogus data.
-4. **Filter:** If the domain is in `blocklist.txt`, the request is ignored or sinkholed.
-5. **Resolve/Forge:** If healthy, it fetches the real IP from an upstream provider, manually constructs a new DNS Answer, and sends it back.
-
-##  Getting Started
-
-### Prerequisites
-
-* Go 1.25+
-* A `blocklist.txt` file in the root directory (one domain per line).
-
-### Running the Project
-
-```bash
-
-# Run the server
-go run main.go
+## Binary protocol
 
 ```
+[ 2 bytes ]  ID       ,  copied from the client query
+[ 2 bytes ]  Flags    ,  0x8180 (standard response) or 0x8183 (NXDOMAIN)
+[ 2 bytes ]  QDCount  ,  question count (mirrored from query)
+[ 2 bytes ]  ANCount  ,  1 for valid responses, 0 for NXDOMAIN
+[ N bytes ]  Question ,  mirrored from the original query
+[ 16 bytes]  Answer   ,  pointer, type, class, TTL, data length, IPv4 address
+```
 
-### Testing the Sinkhole
+## Getting started
 
-You can test it using `dig` or `nslookup` pointed at your local instance:
+Add domains to `blocklist.txt`, one per line. A sample file is included.
 
 ```bash
+go run main.go
+```
+
+Test with `dig`:
+
+```bash
+# Should return a real IP
 dig @127.0.0.1 -p 5353 google.com
 
+# Should return 0.0.0.0
+dig @127.0.0.1 -p 5353 doubleclick.net
 ```
 
----
+## Known limitations
 
+- Only handles A record queries (IPv4)
+- Single-threaded ,  one request at a time, no concurrency
+- No caching; every query is forwarded to upstream
+- Blocklist is loaded once at startup; requires a restart to reflect changes
